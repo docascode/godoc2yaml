@@ -313,6 +313,12 @@ func (h *handlerServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	info.GoogleCN = googleCN(r)
+
+	if r.URL.Query().Get("json") != "" {
+		w.Write(marshalJSON(toDocfx(h.p, info)))
+		return
+	}
+
 	h.p.ServePage(w, Page{
 		Title:    title,
 		Tabtitle: tabtitle,
@@ -789,7 +795,7 @@ func (p *Presentation) ServeText(w http.ResponseWriter, text []byte) {
 func marshalJSON(x interface{}) []byte {
 	var data []byte
 	var err error
-	const indentJSON = false // for easier debugging
+	const indentJSON = true // for easier debugging
 	if indentJSON {
 		data, err = json.MarshalIndent(x, "", "    ")
 	} else {

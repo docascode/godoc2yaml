@@ -29,10 +29,12 @@ package main
 
 import (
 	"archive/zip"
+	"encoding/json"
 	_ "expvar" // to serve /debug/vars
 	"flag"
 	"fmt"
 	"go/build"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -51,6 +53,7 @@ import (
 	"golang.org/x/tools/godoc/vfs/gatefs"
 	"golang.org/x/tools/godoc/vfs/mapfs"
 	"golang.org/x/tools/godoc/vfs/zipfs"
+	"gopkg.in/yaml.v2"
 )
 
 const defaultAddr = ":6060" // default webserver address
@@ -73,6 +76,8 @@ var (
 	html    = flag.Bool("html", false, "print HTML in command-line mode")
 	srcMode = flag.Bool("src", false, "print (exported) source in command-line mode")
 	urlFlag = flag.String("url", "", "print HTML for named URL")
+
+	pkgFlag = flag.String("pkg", "", "generate docfx yaml files for package")
 
 	// command-line searches
 	query = flag.Bool("q", false, "arguments are considered search queries")
@@ -153,6 +158,62 @@ func handleURLFlag() {
 	log.Fatalf("too many redirects")
 }
 
+func handlePkgFlag(path string) {
+	urlstr := "http://localhost" + defaultAddr + "/pkg/" + path + "?json=true"
+	for i := 0; i < 10; i++ {
+		u, err := url.Parse(urlstr)
+		if err != nil {
+			log.Fatal(err)
+		}
+		req := &http.Request{
+			URL: u,
+		}
+
+		// Invoke default HTTP handler to serve request
+		// to our buffering httpWriter.
+		w := httptest.NewRecorder()
+		http.DefaultServeMux.ServeHTTP(w, req)
+
+		switch w.Code {
+		case 200: // ok
+			body := w.Body.Bytes()
+			pkg := godoc.DocsPackage{}
+			err := json.Unmarshal(body, &pkg)
+			if err != nil {
+				log.Fatal(err)
+			}
+			yml, err := yaml.Marshal(&pkg)
+			if err != nil {
+				log.Fatal(err)
+			}
+			data := append([]byte("### YamlMime:GoReference\n"), yml...)
+			file := "docs/" + path + ".yaml"
+			os.MkdirAll(filepath.Dir(file), os.ModePerm)
+			err = ioutil.WriteFile(file, data, os.ModePerm)
+			if err != nil {
+				log.Fatal(err)
+			}
+			fmt.Println("  > " + file)
+			if pkg.Dirs != nil {
+				for _, dir := range pkg.Dirs {
+					if dir.HasPkg {
+						handlePkgFlag(path + "/" + dir.Path)
+					}
+				}
+			}
+			return
+		case 301, 302, 303, 307: // redirect
+			redirect := w.HeaderMap.Get("Location")
+			if redirect == "" {
+				log.Fatalf("HTTP %d without Location header", w.Code)
+			}
+			urlstr = redirect
+		default:
+			log.Fatalf("HTTP error %d", w.Code)
+		}
+	}
+}
+
 func main() {
 	flag.Usage = usage
 	flag.Parse()
@@ -160,13 +221,13 @@ func main() {
 	playEnabled = *showPlayground
 
 	// Check usage: server and no args.
-	if (*httpAddr != "" || *urlFlag != "") && (flag.NArg() > 0) {
+	if (*httpAddr != "" || *urlFlag != "" || *pkgFlag != "") && (flag.NArg() > 0) {
 		fmt.Fprintln(os.Stderr, "can't use -http with args.")
 		usage()
 	}
 
 	// Check usage: command line args or index creation mode.
-	if (*httpAddr != "" || *urlFlag != "") != (flag.NArg() == 0) && !*writeIndex {
+	if (*httpAddr != "" || *urlFlag != "" || *pkgFlag != "") != (flag.NArg() == 0) && !*writeIndex {
 		fmt.Fprintln(os.Stderr, "missing args.")
 		usage()
 	}
@@ -230,7 +291,7 @@ func main() {
 		corpus.IndexThrottle = 1.0
 		corpus.IndexEnabled = true
 	}
-	if *writeIndex || httpMode || *urlFlag != "" {
+	if *writeIndex || httpMode || *urlFlag != "" || *pkgFlag != "" {
 		if err := corpus.Init(); err != nil {
 			log.Fatal(err)
 		}
@@ -248,7 +309,7 @@ func main() {
 		pres.NotesRx = regexp.MustCompile(*notesRx)
 	}
 
-	readTemplates(pres, httpMode || *urlFlag != "")
+	readTemplates(pres, httpMode || *urlFlag != "" || *pkgFlag != "")
 	registerHandlers(pres)
 
 	if *writeIndex {
@@ -280,6 +341,11 @@ func main() {
 	// Print content that would be served at the URL *urlFlag.
 	if *urlFlag != "" {
 		handleURLFlag()
+		return
+	}
+
+	if *pkgFlag != "" {
+		handlePkgFlag(*pkgFlag)
 		return
 	}
 
